@@ -188,10 +188,10 @@
         </div>
       </div>
       <div class="panel">
-        <h3>National heat map &middot; % of city area above 35&deg;C</h3>
+        <h3>National heat map &middot; 2026 summer land-surface temperature</h3>
         <div class="canvas-wrap"><canvas id="p1-map-canvas" height="220"></canvas><div class="tooltip" id="p1-map-tip"></div></div>
         <div class="legend" id="p1-map-legend"><div class="bar"></div><div class="ticks"></div><div class="unit"></div></div>
-        <div class="note" id="p1-map-note">Real national boundary (DataV.GeoAtlas) with all 475 cities and districts plotted at their true centroid, colored by each city's own 2026 % hot area &mdash; the same real numbers as the ranking table below, not a separate estimate. Hover a dot for its name and value; the 9 units with no valid 2026 pixels are shown in grey.</div>
+        <div class="note" id="p1-map-note">A real pixel-level MODIS composite &mdash; not a per-city summary &mdash; downloaded straight from Earth Engine and colored with the exact same palette as the source notebook's own live map, so this is a snapshot of that map rather than a separate visualization. Hover for the nearest city's name and its real % hot area.</div>
       </div>
     </div>
 
@@ -819,8 +819,26 @@ var CITY_CENTROIDS = {"110101":[116.413,39.918],"110102":[116.364,39.915],"11010
     });
     return {lonMin:lonMin, lonMax:lonMax, latMin:latMin, latMax:latMax};
   }
-  var P1_MAP_VMAX = 100; // legend/color scale ceiling for pct_hot_area (%), fixed so the
-                          // color scale doesn't silently rescale between draws
+  // Real MODIS composite raster (Step 9's export), colored with the exact vis_lst palette
+  // from the source notebook's own live Step 3 map -- this is a snapshot of that map, not a
+  // separately invented visualization. Falls back to the vis_lst literal (matching the
+  // notebook) if the metadata JSON hasn't loaded yet, so the legend is never blank.
+  var HEATMAP_META = null;
+  var HEATMAP_IMG = new Image();
+  var HEATMAP_IMG_READY = false;
+  var HEATMAP_FALLBACK_META = {
+    vis_min_c: 5, vis_max_c: 40,
+    palette: ['313695','4575b4','abd9e9','ffffbf','fdae61','d73027'],
+  };
+  HEATMAP_IMG.onload = function(){ HEATMAP_IMG_READY = true; buildPage1Map(); };
+  HEATMAP_IMG.onerror = function(){ /* handled as "still loading/unavailable" by buildPage1Map's own check */ };
+
+  function unprojectPoint(x, y, bbox, cssW, cssH){
+    var lon = bbox.lonMin + (x/cssW) * (bbox.lonMax-bbox.lonMin);
+    var lat = bbox.latMin + (1 - y/cssH) * (bbox.latMax-bbox.latMin);
+    return [lon, lat];
+  }
+
   function buildPage1Map(){
     if(!CHINA_BBOX) CHINA_BBOX = computeChinaBbox();
     var canvas = document.getElementById('p1-map-canvas');
@@ -855,67 +873,72 @@ var CITY_CENTROIDS = {"110101":[116.413,39.918],"110102":[116.364,39.915],"11010
       return [xy[0]+margin, xy[1]+margin];
     }
 
-    ctx.fillStyle = 'rgba(255,122,69,.04)';
-    ctx.strokeStyle = 'rgba(255,122,69,.5)';
-    ctx.lineWidth = 1.1;
-    MAP_CTX.china.forEach(function(ring){
-      ctx.beginPath();
-      ring.forEach(function(pt, i){
-        var xy = proj(pt[0], pt[1]);
-        if(i===0) ctx.moveTo(xy[0], xy[1]); else ctx.lineTo(xy[0], xy[1]);
+    if(HEATMAP_IMG_READY && HEATMAP_META){
+      // draw the real raster at its own true geographic bbox, projected into this canvas's
+      // current fit -- so it lines up with the boundary stroke below regardless of resize
+      var b = HEATMAP_META.bbox;
+      var topLeft = proj(b.lon_min, b.lat_max);
+      var bottomRight = proj(b.lon_max, b.lat_min);
+      ctx.drawImage(HEATMAP_IMG, topLeft[0], topLeft[1], bottomRight[0]-topLeft[0], bottomRight[1]-topLeft[1]);
+      ctx.strokeStyle = 'rgba(230,237,243,.35)';
+      ctx.lineWidth = 1;
+      MAP_CTX.china.forEach(function(ring){
+        ctx.beginPath();
+        ring.forEach(function(pt, i){
+          var xy = proj(pt[0], pt[1]);
+          if(i===0) ctx.moveTo(xy[0], xy[1]); else ctx.lineTo(xy[0], xy[1]);
+        });
+        ctx.closePath();
+        ctx.stroke();
       });
-      ctx.closePath();
-      ctx.fill();
-      ctx.stroke();
-    });
+    } else {
+      // fallback while the heatmap PNG/metadata are still loading (or failed to load): the
+      // plain boundary outline, so the panel is never blank -- never silently empty.
+      ctx.fillStyle = 'rgba(255,122,69,.05)';
+      ctx.strokeStyle = 'rgba(255,122,69,.5)';
+      ctx.lineWidth = 1.1;
+      MAP_CTX.china.forEach(function(ring){
+        ctx.beginPath();
+        ring.forEach(function(pt, i){
+          var xy = proj(pt[0], pt[1]);
+          if(i===0) ctx.moveTo(xy[0], xy[1]); else ctx.lineTo(xy[0], xy[1]);
+        });
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+      });
+      ctx.fillStyle = '#8695a7'; ctx.font = '11px "Space Mono", monospace'; ctx.textAlign = 'center';
+      ctx.fillText('Loading heat map\u2026', cssW/2, cssH/2);
+      ctx.textAlign = 'left';
+    }
 
-    var markers = [];
+    // hover: no dots drawn on the raster itself, but the cursor's lon/lat still resolves to
+    // the nearest real city (via the same CITY_CENTROIDS used for the ranking table), so a
+    // hover still surfaces which city a hot/cold patch belongs to.
     var rows = (P1_DATA && P1_DATA.city_ranking_latest_year) || null;
-    if(rows){
-      // real per-city heat dots: one per city/district, colored by its own real pct_hot_area
+    var tip = document.getElementById('p1-map-tip');
+    canvas.onmousemove = function(e){
+      if(!rows){ tip.style.opacity = 0; return; }
+      var rect = canvas.getBoundingClientRect();
+      var x = e.clientX - rect.left, y = e.clientY - rect.top;
+      var lonlat = unprojectPoint(x-margin, y-margin, fitBbox, innerW, innerH);
+      var best = null, bestD = 1.2*1.2; // ~1.2 degree search radius
       rows.forEach(function(row){
         var xy0 = CITY_CENTROIDS[row.adcode];
         if(!xy0) return;
-        var xy = proj(xy0[0], xy0[1]);
-        var hasVal = row.pct_hot_area !== null && row.pct_hot_area !== undefined;
-        var color = hasVal ? scaleColor(THERMAL, row.pct_hot_area/P1_MAP_VMAX) : '#3a4552';
-        ctx.beginPath(); ctx.arc(xy[0], xy[1], 2.1, 0, Math.PI*2);
-        ctx.fillStyle = color; ctx.globalAlpha = 0.9; ctx.fill(); ctx.globalAlpha = 1;
-        markers.push({
-          x:xy[0], y:xy[1],
-          name:(row.name_en||row.name) + ', ' + (row.province_en||row.province),
-          val: hasVal ? row.pct_hot_area.toFixed(1)+'% hot area' : 'no valid 2026 pixels',
-        });
-      });
-    } else {
-      // fallback before page1_national.json has loaded: plain locator dots, no color/values yet
-      MAP_CTX.majorCities.forEach(function(city){
-        var xy = proj(city.lon, city.lat);
-        ctx.beginPath(); ctx.arc(xy[0], xy[1], 2.6, 0, Math.PI*2);
-        ctx.fillStyle = '#8695a7'; ctx.fill();
-        markers.push({x:xy[0], y:xy[1], name:city.name, val:'loading...'});
-      });
-    }
-
-    var tip = document.getElementById('p1-map-tip');
-    canvas.onmousemove = function(e){
-      var rect = canvas.getBoundingClientRect();
-      var x = e.clientX - rect.left, y = e.clientY - rect.top;
-      var best = null, bestD = 9*9;
-      markers.forEach(function(m){
-        var d = (m.x-x)*(m.x-x) + (m.y-y)*(m.y-y);
-        if(d < bestD){ bestD = d; best = m; }
+        var d = (xy0[0]-lonlat[0])*(xy0[0]-lonlat[0]) + (xy0[1]-lonlat[1])*(xy0[1]-lonlat[1]);
+        if(d < bestD){ bestD = d; best = row; }
       });
       if(!best){ tip.style.opacity = 0; return; }
-      tip.textContent = best.name + ' \u2014 ' + best.val;
-      tip.style.left = best.x+'px'; tip.style.top = best.y+'px';
+      var val = (best.pct_hot_area===null||best.pct_hot_area===undefined) ? 'no valid 2026 pixels' : best.pct_hot_area.toFixed(1)+'% hot area';
+      tip.textContent = (best.name_en||best.name) + ', ' + (best.province_en||best.province) + ' \u2014 ' + val;
+      tip.style.left = x+'px'; tip.style.top = y+'px';
       tip.style.opacity = 1;
     };
     canvas.onmouseleave = function(){ tip.style.opacity = 0; };
 
-    if(rows){
-      renderLegendBar(document.getElementById('p1-map-legend'), THERMAL, 0, P1_MAP_VMAX, '% of city area > 35\u00b0C LST');
-    }
+    var legendMeta = HEATMAP_META || HEATMAP_FALLBACK_META;
+    renderLegendBar(document.getElementById('p1-map-legend'), legendMeta.palette, legendMeta.vis_min_c, legendMeta.vis_max_c, 'LST (\u00b0C), 2026 summer mean');
   }
 
   // ---------- tabs ----------
@@ -950,6 +973,15 @@ var CITY_CENTROIDS = {"110101":[116.413,39.918],"110102":[116.364,39.915],"11010
       buildPage1Map();
     }).catch(function(err){
       errorBanner(document.querySelector('#p1 .page-head'), 'The national city ranking failed to load. The coverage chart and map above still show real diagnostic output.', String(err));
+    });
+
+    loadJSON('national_lst_heatmap_2026.json').then(function(meta){
+      HEATMAP_META = meta;
+      HEATMAP_IMG.src = 'national_lst_heatmap_2026.png'; // triggers HEATMAP_IMG.onload -> buildPage1Map() above
+      buildPage1Map(); // redraw now so the legend/fallback state picks up the real min/max immediately
+    }).catch(function(err){
+      // non-fatal: buildPage1Map()'s own fallback path keeps showing the boundary outline
+      console.error('national heat map image failed to load:', err);
     });
 
     loadJSON('page2_shenzhen_lst_grid.json').then(buildPage2).catch(function(err){
