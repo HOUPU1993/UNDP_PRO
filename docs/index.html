@@ -175,7 +175,7 @@
     <div class="page-head">
       <div class="chapter">Chapter 01 &middot; The wide view</div>
       <h2>National Heat Distribution (2018&ndash;2026)</h2>
-      <p>Built from MODIS Terra/Aqua land-surface temperature (LST), averaged over each summer (June&ndash;September) across roughly 300 Chinese prefecture-level cities. The coverage chart below is real diagnostic output from that pipeline. The city-by-city heat ranking and year-over-year stability score are still being computed in the source notebook and will replace the panel below once that run finishes.</p>
+      <p>Built from MODIS Terra/Aqua land-surface temperature (LST), averaged over each summer (June&ndash;September) across 475 Chinese cities and districts. Every number on this page &mdash; the coverage diagnostic, the national trend, and the full city ranking with its stability label &mdash; is real output from the source notebook's Step&nbsp;5/7/8 pipeline, run to completion.</p>
     </div>
 
     <div class="grid-layout">
@@ -190,25 +190,36 @@
       <div class="panel">
         <h3>Where this analysis looks</h3>
         <div class="canvas-wrap"><canvas id="p1-map-canvas" height="220"></canvas><div class="tooltip" id="p1-map-tip"></div></div>
-        <div class="note">Real national boundary (DataV.GeoAtlas) with the 20 major cities sampled for the ranking script below marked as dots &mdash; this is the study area, not the ranking result.</div>
+        <div class="note">Real national boundary (DataV.GeoAtlas) with 20 major cities marked as dots for orientation &mdash; the full ranking below covers all 475 cities and districts, not just these.</div>
       </div>
     </div>
 
-    <div class="chips">
+    <div class="chips" id="p1-chips">
       <div class="chip">Satellite<br><b>MOD11A2 / MYD11A2</b></div>
       <div class="chip">Resolution<br><b>1&nbsp;km</b></div>
       <div class="chip">Years<br><b>2018&ndash;2026</b></div>
-      <div class="chip">Cities<br><b>&#8776;300</b></div>
+      <div class="chip">Cities analyzed<br><b>475</b></div>
     </div>
 
     <div class="panel" style="margin-top:20px;">
-      <h3>City heat ranking &amp; stability (2026 vs. 2018&ndash;2025)</h3>
-      <div class="banner pending">
-        <span class="tag">Pending</span>
-        <div>
-          Ranking all ~300 cities requires running <code>reduceRegions()</code> against Earth Engine from a real GEE kernel &mdash; that hadn't finished as of this deploy, so <b>no numbers are invented here</b>. The source notebook (<code>00_CH_nationalheat.ipynb</code>) now has the full pipeline: Step&nbsp;5 computes every city &times; year, Step&nbsp;7 fits each city's 9&#8209;year trend and labels it warming / cooling / stable, and Step&nbsp;8 exports <code>data/national/page1_national.json</code> &mdash; the exact file this panel needs. Once that file exists, this panel goes live with real numbers.
-        </div>
+      <h3>National trend &middot; mean share of city area above 35&deg;C LST</h3>
+      <div class="canvas-wrap"><canvas id="p1-trend-canvas" height="200"></canvas></div>
+      <div class="note" id="p1-trend-note">Averaged across all 475 cities each year. 2026 comes out noticeably lower than 2018&ndash;2023 &mdash; consistent with the per-city stability finding below (no city trends significantly warmer over this period; the two together read as one real, if provisional, signal rather than either alone).</div>
+    </div>
+
+    <div class="panel" style="margin-top:20px;">
+      <div style="display:flex; justify-content:space-between; align-items:baseline; flex-wrap:wrap; gap:10px;">
+        <h3 style="margin:0;">City ranking &amp; stability, 2026</h3>
+        <div class="chips" style="margin-top:0;" id="p1-stability-chips"></div>
       </div>
+      <div class="note" style="margin-top:12px;">Stability = a 9-point OLS trend (2018&ndash;2026) of each city's % hot area, labelled warming/cooling only at p&lt;0.05 &mdash; see Chapter 04's method note for the same caveat about this kind of simplified significance test. City names are auto-romanized from the source Chinese administrative name (Hanyu&nbsp;Pinyin); a handful of uncommon-character names may romanize imperfectly, and 9 of the 475 units returned no valid LST pixels for 2026 (shown as &mdash;) &mdash; both are noted rather than patched over.</div>
+      <div style="overflow-x:auto; margin-top:14px;">
+        <table class="clusters" id="p1-ranking-table">
+          <thead><tr><th>#</th><th>City</th><th>Province</th><th>Mean LST</th><th>% area &gt;35&deg;C</th><th>2018&ndash;2026 trend</th></tr></thead>
+          <tbody id="p1-ranking-tbody"></tbody>
+        </table>
+      </div>
+      <div id="p1-ranking-more" style="margin-top:10px; text-align:center;"></div>
     </div>
   </section>
 
@@ -649,10 +660,13 @@ var MAP_CTX = {"china":[[[101.70397,21.92904],[101.77706,21.82691],[101.77117,21
   }
 
   // ============ PAGE 1: NATIONAL COVERAGE CHART (real diagnostic numbers already produced) ============
+  // Fallback values match the notebook's own diagnostic output; overwritten by the fetched
+  // page1_national.json (national_yearly[].coverage_pct) the moment that file loads.
   var COVERAGE = [
     {y:2018,v:97.1},{y:2019,v:97.8},{y:2020,v:97.9},{y:2021,v:97.2},{y:2022,v:98.2},
     {y:2023,v:97.8},{y:2024,v:97.8},{y:2025,v:98.4},{y:2026,v:98.6}
   ];
+  var P1_DATA = null; // populated once page1_national.json loads
   function buildPage1Coverage(){
     var canvas = document.getElementById('p1-coverage-canvas');
     var dpr = window.devicePixelRatio||1;
@@ -686,6 +700,102 @@ var MAP_CTX = {"china":[[[101.70397,21.92904],[101.77706,21.82691],[101.77117,21
       ctx.fillStyle = '#8695a7'; ctx.fillText(d.y, cx, cssH-6);
     });
     ctx.textAlign = 'left';
+  }
+
+  // ============ PAGE 1: NATIONAL TREND -- mean % of city area above the hot threshold ============
+  function buildPage1Trend(){
+    var canvas = document.getElementById('p1-trend-canvas');
+    if(!canvas) return;
+    var rows = (P1_DATA && P1_DATA.national_yearly) || [];
+    var dpr = window.devicePixelRatio||1;
+    var cssW = canvas.clientWidth || canvas.parentElement.clientWidth;
+    var cssH = 200;
+    canvas.width = Math.round(cssW*dpr); canvas.height = Math.round(cssH*dpr);
+    canvas.style.height = cssH+'px';
+    var ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+    ctx.clearRect(0,0,cssW,cssH);
+    if(!rows.length){
+      ctx.fillStyle = '#8695a7'; ctx.font = '12px "Space Mono", monospace';
+      ctx.fillText('Waiting on page1_national.json...', 10, cssH/2);
+      return;
+    }
+    var padL=40, padB=24, padT=14, padR=14;
+    var w = cssW-padL-padR, h = cssH-padT-padB;
+    var vals = rows.map(function(d){ return d.mean_pct_hot_area; });
+    var vmin = 0, vmax = Math.max.apply(null, vals)*1.15;
+    ctx.strokeStyle = '#1c2530'; ctx.fillStyle = '#8695a7';
+    ctx.font = '11px "Space Mono", monospace';
+    var gridN = 4;
+    for(var g=0; g<=gridN; g++){
+      var gv = vmax*g/gridN;
+      var y = padT + h*(1-(gv-vmin)/(vmax-vmin));
+      ctx.beginPath(); ctx.moveTo(padL,y); ctx.lineTo(cssW-padR,y); ctx.stroke();
+      ctx.fillText(gv.toFixed(0)+'%', 4, y+3);
+    }
+    function xAt(i){ return padL + (rows.length===1 ? w/2 : i*(w/(rows.length-1))); }
+    function yAt(v){ return padT + h*(1-(v-vmin)/(vmax-vmin)); }
+    // area fill
+    ctx.beginPath();
+    rows.forEach(function(d,i){ var x=xAt(i), y=yAt(d.mean_pct_hot_area); if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y); });
+    ctx.lineTo(xAt(rows.length-1), padT+h); ctx.lineTo(xAt(0), padT+h); ctx.closePath();
+    var grad = ctx.createLinearGradient(0,padT,0,padT+h);
+    grad.addColorStop(0,'rgba(255,122,69,.35)'); grad.addColorStop(1,'rgba(255,122,69,.02)');
+    ctx.fillStyle = grad; ctx.fill();
+    // line
+    ctx.beginPath();
+    rows.forEach(function(d,i){ var x=xAt(i), y=yAt(d.mean_pct_hot_area); if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y); });
+    ctx.strokeStyle = '#ff7a45'; ctx.lineWidth = 2; ctx.stroke();
+    // points + labels
+    rows.forEach(function(d,i){
+      var x=xAt(i), y=yAt(d.mean_pct_hot_area);
+      ctx.beginPath(); ctx.arc(x,y,3,0,Math.PI*2); ctx.fillStyle = '#ff7a45'; ctx.fill();
+      ctx.fillStyle = '#e6edf3'; ctx.font='11px "Space Mono", monospace'; ctx.textAlign='center';
+      ctx.fillText(d.mean_pct_hot_area.toFixed(1), x, y-9);
+      ctx.fillStyle = '#8695a7'; ctx.fillText(d.year, x, cssH-6);
+    });
+    ctx.textAlign = 'left';
+  }
+
+  // ============ PAGE 1: CITY RANKING TABLE + STABILITY SUMMARY (real Step7/8 notebook output) ============
+  var P1_RANKING_SHOWN = 30;
+  function stabilityTag(row){
+    if(row.stability === 'warming') return '<span style="color:var(--danger); font-weight:700;">&#9650; warming</span>';
+    if(row.stability === 'cooling') return '<span style="color:var(--pending); font-weight:700;">&#9660; cooling</span>';
+    return '<span style="color:var(--text-dim);">&#9679; stable</span>';
+  }
+  function renderP1RankingRows(){
+    var rows = (P1_DATA && P1_DATA.city_ranking_latest_year) || [];
+    var tbody = document.getElementById('p1-ranking-tbody');
+    var shown = rows.slice(0, P1_RANKING_SHOWN);
+    tbody.innerHTML = shown.map(function(r){
+      var lst = (r.mean_LST_C===null||r.mean_LST_C===undefined) ? '&mdash;' : r.mean_LST_C.toFixed(1)+'&deg;C';
+      var pct = (r.pct_hot_area===null||r.pct_hot_area===undefined) ? '&mdash; <span style="color:var(--text-dim); font-family:var(--sans); font-size:11px;">(no valid pixels)</span>' : r.pct_hot_area.toFixed(1)+'%';
+      return '<tr><td>'+r.rank+'</td><td style="font-family:var(--sans); font-weight:600;">'+(r.name_en||r.name)+'</td>'
+        + '<td style="font-family:var(--sans);">'+(r.province_en||r.province)+'</td>'
+        + '<td>'+lst+'</td><td>'+pct+'</td><td>'+stabilityTag(r)+'</td></tr>';
+    }).join('');
+    var more = document.getElementById('p1-ranking-more');
+    if(rows.length > P1_RANKING_SHOWN){
+      more.innerHTML = '<button class="mode-row-btn" id="p1-show-more" style="background:var(--surface-2); border:1px solid var(--border); color:var(--text); font-family:var(--mono); font-size:12px; padding:8px 16px; border-radius:8px; cursor:pointer;">Show all '+rows.length+' cities &amp; districts</button>';
+      document.getElementById('p1-show-more').onclick = function(){ P1_RANKING_SHOWN = rows.length; renderP1RankingRows(); };
+    } else {
+      more.innerHTML = rows.length ? '<span style="color:var(--text-dim); font-size:12px; font-family:var(--mono);">All '+rows.length+' cities &amp; districts shown.</span>' : '';
+    }
+  }
+  function buildPage1Ranking(){
+    if(!P1_DATA) return;
+    renderP1RankingRows();
+    var rows = P1_DATA.city_ranking_latest_year || [];
+    var counts = {warming:0, cooling:0, stable:0};
+    rows.forEach(function(r){ if(counts[r.stability]!==undefined) counts[r.stability]++; });
+    var chips = document.getElementById('p1-stability-chips');
+    if(chips){
+      chips.innerHTML =
+        '<div class="chip"><span style="color:var(--danger);">&#9650;</span> Warming<br><b>'+counts.warming+'</b></div>'
+        + '<div class="chip"><span style="color:var(--pending);">&#9660;</span> Cooling<br><b>'+counts.cooling+'</b></div>'
+        + '<div class="chip"><span style="color:var(--text-dim);">&#9679;</span> Stable<br><b>'+counts.stable+'</b></div>';
+    }
   }
 
   // ============ PAGE 1: LOCATOR MAP (real national boundary + real major-city centroids) ============
@@ -785,7 +895,7 @@ var MAP_CTX = {"china":[[[101.70397,21.92904],[101.77706,21.82691],[101.77117,21
     document.getElementById(btn.dataset.page).classList.add('active');
     // the just-shown section only now has a real (non-zero) width -- redraw its canvas(es)
     // now rather than relying on the stale draw from whenever its JSON happened to load.
-    if(btn.dataset.page === 'p1'){ buildPage1Coverage(); buildPage1Map(); }
+    if(btn.dataset.page === 'p1'){ buildPage1Coverage(); buildPage1Map(); buildPage1Trend(); buildPage1Ranking(); }
     else if(pageRenderers[btn.dataset.page]) pageRenderers[btn.dataset.page]();
   });
 
@@ -793,7 +903,20 @@ var MAP_CTX = {"china":[[[101.70397,21.92904],[101.77706,21.82691],[101.77117,21
   fontsReady.then(function(){
     buildPage1Coverage();
     buildPage1Map();
-    window.addEventListener('resize', function(){ buildPage1Coverage(); buildPage1Map(); });
+    buildPage1Trend();
+    window.addEventListener('resize', function(){ buildPage1Coverage(); buildPage1Map(); buildPage1Trend(); });
+
+    loadJSON('page1_national.json').then(function(data){
+      P1_DATA = data;
+      if(data.national_yearly && data.national_yearly.length){
+        COVERAGE = data.national_yearly.map(function(d){ return {y:d.year, v:d.coverage_pct}; });
+      }
+      buildPage1Coverage();
+      buildPage1Trend();
+      buildPage1Ranking();
+    }).catch(function(err){
+      errorBanner(document.querySelector('#p1 .page-head'), 'The national city ranking failed to load. The coverage chart and map above still show real diagnostic output.', String(err));
+    });
 
     loadJSON('page2_shenzhen_lst_grid.json').then(buildPage2).catch(function(err){
       errorBanner(document.getElementById('p2-body'), 'The Shenzhen heat grid failed to load. This does not mean the data is missing -- please refresh or let me know.', String(err));
